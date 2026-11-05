@@ -82,14 +82,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             gravity = Gravity.CENTER
         }
         keyBox = EditText(this).apply {
-            hint = "Claude API key yahan paste karo"
+            hint = "Gemini API key yahan paste karo"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(prefs().getString("key", ""))
+            setText(prefs().getString("gkey", ""))
         }
         val save = Button(this).apply {
             text = "Key save karo"
             setOnClickListener {
-                prefs().edit().putString("key", keyBox.text.toString().trim()).apply()
+                prefs().edit().putString("gkey", keyBox.text.toString().trim()).apply()
                 say("Key save ho gayi!")
             }
         }
@@ -170,7 +170,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             answer.any { t.contains(it) } -> answerCall(t)
             dial.any { t.contains(it) } -> dialNumber(t)
             open.any { t.contains(it) } -> openApp(t)
-            else -> askClaude(text)
+            else -> askAi(text)
         }
     }
 
@@ -229,7 +229,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             am.setStreamVolume(AudioManager.STREAM_VOICE_CALL,
                 am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL), 0)
             if (msg.isNotBlank()) {
-                askClaude(
+                askAi(
                     "Tum abhi mere phone par call utha chuki ho aur caller se baat kar rahi ho. " +
                     "Meri taraf se caller ko ye baat politely, 2 vaakya mein bolo: $msg"
                 )
@@ -239,35 +239,41 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }, 1500)
     }
 
-    private fun askClaude(userText: String) {
-        val key = prefs().getString("key", "") ?: ""
+    private fun part(text: String) = JSONArray().put(JSONObject().put("text", text))
+
+    private fun askAi(userText: String) {
+        val key = prefs().getString("gkey", "") ?: ""
         if (key.isBlank()) {
-            say("Pehle upar Claude API key daal ke save karo.")
+            say("Pehle upar Gemini API key daal ke save karo.")
             return
         }
-        history.put(JSONObject().put("role", "user").put("content", userText))
+        history.put(JSONObject().put("role", "user").put("parts", part(userText)))
         Thread {
             try {
                 val body = JSONObject()
-                    .put("model", "claude-sonnet-5-5")
-                    .put("max_tokens", 300)
-                    .put("system", systemPrompt)
-                    .put("messages", history)
-                val c = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
+                    .put("systemInstruction", JSONObject().put("parts", part(systemPrompt)))
+                    .put("contents", history)
+                    .put("generationConfig", JSONObject().put("maxOutputTokens", 1024))
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
+                val c = URL(url).openConnection() as HttpURLConnection
                 c.requestMethod = "POST"
                 c.connectTimeout = 15000
-                c.readTimeout = 30000
-                c.setRequestProperty("content-type", "application/json")
-                c.setRequestProperty("x-api-key", key)
-                c.setRequestProperty("anthropic-version", "2023-06-01")
+                c.readTimeout = 40000
+                c.setRequestProperty("Content-Type", "application/json")
+                c.setRequestProperty("x-goog-api-key", key)
                 c.doOutput = true
                 c.outputStream.use { it.write(body.toString().toByteArray()) }
                 val code = c.responseCode
                 val stream = if (code in 200..299) c.inputStream else c.errorStream
                 val resp = stream.bufferedReader().readText()
                 if (code !in 200..299) throw Exception("Error $code")
-                val reply = JSONObject(resp).getJSONArray("content").getJSONObject(0).getString("text")
-                history.put(JSONObject().put("role", "assistant").put("content", reply))
+                val parts = JSONObject(resp).getJSONArray("candidates").getJSONObject(0)
+                    .getJSONObject("content").getJSONArray("parts")
+                val sb = StringBuilder()
+                for (i in 0 until parts.length()) sb.append(parts.getJSONObject(i).optString("text", ""))
+                val reply = sb.toString().trim()
+                if (reply.isEmpty()) throw Exception("Khali jawab aaya")
+                history.put(JSONObject().put("role", "model").put("parts", part(reply)))
                 while (history.length() > 12) history.remove(0)
                 while (history.length() > 0 && history.getJSONObject(0).getString("role") != "user") history.remove(0)
                 ui.post { say(reply) }
@@ -275,7 +281,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 if (history.length() > 0 && history.getJSONObject(history.length() - 1).getString("role") == "user") {
                     history.remove(history.length() - 1)
                 }
-                ui.post { say("Kuch gadbad ho gayi: ${e.message}. Internet ya API key check karo.") }
+                ui.post { say("Kuch gadbad ho gayi: ${e.message}. Internet ya key check karo, ya thodi der baad try karo.") }
             }
         }.start()
     }
